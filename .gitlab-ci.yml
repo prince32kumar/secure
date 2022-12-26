@@ -1,0 +1,144 @@
+stages:
+- Build
+- sast
+- dependency
+- Artifact
+- Predeploy
+- Backup
+- Deploy
+- dast
+
+include:
+   - template: Security/SAST.gitlab-ci.yml
+   - template: DAST.gitlab-ci.yml
+   - template: Security/Dependency-Scanning.gitlab-ci.yml
+
+Bootstrap:
+  stage: Build
+  tags:
+      - docker20
+  image: maven:latest
+  artifacts:
+    paths:
+        - "./target"
+    expire_in: 1 week
+  script:
+    - mvn package
+
+sast:
+  stage: sast
+  tags:
+  - docker20
+  artifacts:
+    paths:
+    - gl-sast-report.json
+    reports:
+      sast: gl-sast-report.json
+
+dependency_scanning:
+  stage: dependency
+  tags:
+  - docker20
+  artifacts:
+    paths:
+    - gl-dependency-scanning-report.json
+    reports:
+      dependency_scanning: gl-dependency-scanning-report.json
+
+upload_artifacts:
+   stage: Artifact
+   image: eamonwoortman/alpine-curl-zip
+   dependencies:
+       - Bootstrap
+   tags:
+       - Package
+   script:
+        - mkdir -p $CI_PROJECT_DIR/Package
+        - cp -f $CI_PROJECT_DIR/target/*.war $CI_PROJECT_DIR/Package/Bootstrap.war
+        - version=0; 
+        - CRL=200; 
+        - 'while [ "$CRL" == "200" ]; do version=`expr $version + 1`; CRL=$(curl -k --header "PRIVATE-TOKEN: $TOKEN" -k -s -o /dev/null -I -w "%{http_code}" $CI_API_V4_URL/projects/$CI_PROJECT_ID/packages/maven/DIY/$ENVVAR/$version/$CI_PROJECT_NAME-$ENVVAR-$version.tar.gz); done'
+        - echo $ENVVAR
+        - echo $version
+        - cd Package
+        - tar -zcvf $CI_PROJECT_NAME-$ENVVAR-$version.tar.gz ./*
+        #- zip -r $CI_PROJECT_NAME-$ENVVAR-$version.zip ./*
+        - 'curl -k --header "PRIVATE-TOKEN: $TOKEN" --upload-file $CI_PROJECT_NAME-$ENVVAR-$version.tar.gz $CI_API_V4_URL/projects/$CI_PROJECT_ID/packages/maven/DIY/$ENVVAR/$version/$CI_PROJECT_NAME-$ENVVAR-$version.tar.gz'
+        - echo $ENVVAR
+        - echo $version
+        - ls
+        - 'curl -k --request PUT --header "PRIVATE-TOKEN: $TOKEN" "$CI_API_V4_URL/projects/$CI_PROJECT_ID/variables/UAT_VERSION" --form "value=$version"'
+        - echo $ENVVAR
+        - echo $version
+   variables:
+        ENVVAR: "UAT"
+   artifacts:
+       paths:
+           - './Package'
+       expire_in: 1 week
+
+# GetPackage:
+#     stage: Predeploy  
+#     #image: eamonwoortman/alpine-curl-zip
+#     script:
+#         - 'curl -k --header "PRIVATE-TOKEN: $TOKEN" -o Test.tar.gz $CI_API_V4_URL/projects/$CI_PROJECT_ID/packages/maven/$CI_PROJECT_NAME/$ENVVAR/$version/$CI_PROJECT_NAME-$ENVVAR-$version.tar.gz'
+#         - ls
+#         - mkdir -p Target
+#         - cp -rf "Test.tar.gz" "$CI_PROJECT_DIR/Target"
+#         - cd Target
+#         #- unzip -o "Test.zip"
+#         - tar -zxvf Test.tar.gz
+#         - cd ..
+#         - rm -rf "Target/Test.tar.gz"
+#     tags: [Package]
+#     variables:
+#         ENVVAR: "UAT"
+#         version: $UAT_VERSION
+#     artifacts:
+#         paths:
+#             - './Target'
+#         expire_in: 1 week
+
+Backup_Bootstrap:
+    stage: Backup
+    dependencies:
+        #- GetPackage
+        - upload_artifacts
+    tags:
+        - Deploytomcat
+    script:
+        - if(Test-Path -Path "Package\\Bootstrap.war"){
+        - $time=get-date -Format yyyyMMddTHHmm
+        - if(Test-Path -Path "$Backup_Dir\\Backup_$time"){ New-Item -Type "directory" -Path "$Backup_Dir\\Backup_$time" }
+        - Copy-Item -Path "$Deployment_Dir" -Destination "$Backup_Dir\\Backup_$time" -Force -Recurse} else{Write-Host "Backup does not exists"} 
+    variables:
+        Backup_Dir: "C:\\Backup_Dir"
+        Deployment_Dir: "C:\\Program Files\\Apache Software Foundation\\Tomcat 9.0\\webapps"
+
+Deploy_Bootstrap:
+  stage: Deploy
+  dependencies: 
+      #- GetPackage
+      - upload_artifacts
+  tags: 
+      - Deploytomcat
+  script:
+      - if(Test-Path -Path "Package\\Bootstrap.war"){
+      - Remove-Item -Path "$Deployment_Dir\\Bootstrap.war" -Recurse
+      - Copy-Item -Path "Package\\Bootstrap.war" -Destination "$Deployment_Dir" -Force -Recurse } else{Write-Host "Backup does not exists"}
+  variables:
+        Backup_Dir: "C:\\Backup_Dir"
+        Deployment_Dir: "C:\\Program Files\\Apache Software Foundation\\Tomcat 9.0\\webapps"
+
+dast:
+  stage: dast
+  tags:
+    - docker20
+  variables:
+    DAST_WEBSITE: "http://192.168.30.144:8080/Bootstrap/"
+    #scanner_profile: dast-checking
+  artifacts:
+    paths:
+    - gl-dast-report.json
+    reports:
+      dast: gl-dast-report.json 
